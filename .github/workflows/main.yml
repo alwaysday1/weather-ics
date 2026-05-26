@@ -1,0 +1,58 @@
+name: Refresh weather ICS
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'   # every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate ICS files
+        run: |
+          mkdir -p public
+          python weather_ics.py --city shanghai  --out public/shanghai.ics
+          python weather_ics.py --city singapore --out public/singapore.ics
+          # add more cities as needed
+
+      - name: Write index for sanity
+        run: |
+          cat > public/index.html <<'EOF'
+          <!doctype html><meta charset="utf-8"><title>Weather ICS</title>
+          <h1>Weather ICS feeds</h1>
+          <ul>
+            <li><a href="shanghai.ics">Shanghai 上海</a></li>
+            <li><a href="singapore.ics">Singapore 新加坡</a></li>
+          </ul>
+          <p>Subscribe in Apple Calendar: copy URL → Calendar app → New Subscription.</p>
+          EOF
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
