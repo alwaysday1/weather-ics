@@ -103,11 +103,15 @@ def build_ics(data: dict, city_name: str) -> str:
         code = daily["weather_code"][i]
         tmax = daily["temperature_2m_max"][i]
         tmin = daily["temperature_2m_min"][i]
+        # Open-Meteo may return null for the tail days of the 16-day horizon;
+        # skip any day missing essential fields rather than crashing on round(None).
+        if code is None or tmax is None or tmin is None:
+            continue
         precip = daily["precipitation_sum"][i] or 0
         pop = daily["precipitation_probability_max"][i] or 0
         wind = daily["wind_speed_10m_max"][i] or 0
-        sunrise = daily["sunrise"][i].split("T")[1]
-        sunset = daily["sunset"][i].split("T")[1]
+        sunrise = (daily["sunrise"][i] or "T").split("T")[1]
+        sunset = (daily["sunset"][i] or "T").split("T")[1]
 
         emoji, label = WMO.get(code, ("", f"代码{code}"))
         ymd = date_str.replace("-", "")
