@@ -73,6 +73,10 @@ UID 按 `weather-<city>-<yyyymmdd>` 生成，**重复订阅会覆盖而不是堆
 
 Open-Meteo 非商用 10,000 次/天免费。本方案每小时刷新一次，即每个城市最多 24 次/天，仍远低于上限。
 
+## 定时任务保活
+
+GitHub 会自动停用长期无仓库活动的公开仓库定时工作流。`.github/workflows/heartbeat.yml` 每月更新一次 `.github/heartbeat.md` 并提交到 `main`，避免天气刷新任务因 60 天无活动而停用。该工作流只申请 `contents: write` 权限；如果同月重复运行，内容不变且不会产生新提交。
+
 ## 自定义
 
 - 想要小时级预报：把 `daily=...` 换成 `hourly=...`，每小时一个 VEVENT，但 16 天 × 24 = 384 个事件会让日历视图变拥挤，一般不推荐。
