@@ -2,7 +2,7 @@ name: Refresh weather ICS
 
 on:
   schedule:
-    - cron: '17 */6 * * *'   # every 6 hours
+    - cron: '17 * * * *'   # hourly, so short-lived warnings arrive sooner
   workflow_dispatch:
 
 permissions:
@@ -18,18 +18,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Generate ICS files
         run: |
           mkdir -p public
-          python weather_ics.py --city shanghai  --out public/shanghai.ics
-          python weather_ics.py --city singapore --out public/singapore.ics
+          python weather_ics.py --city shanghai  --alerts cma  --out public/shanghai.ics
+          python weather_ics.py --city singapore --alerts none --out public/singapore.ics
           # add more cities as needed
+
+      - name: Test ICS generator
+        run: python -m unittest -v
 
       - name: Write index for sanity
         run: |
@@ -40,10 +43,11 @@ jobs:
             <li><a href="shanghai.ics">Shanghai 上海</a></li>
             <li><a href="singapore.ics">Singapore 新加坡</a></li>
           </ul>
+          <p>Shanghai includes current official CMA weather warnings, merged by signal type.</p>
           <p>Subscribe in Apple Calendar: copy URL → Calendar app → New Subscription.</p>
           EOF
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: public
 
@@ -55,4 +59,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -10,9 +10,12 @@ Usage:
 """
 import argparse
 import json
+import re
+import sys
 import urllib.request
 import urllib.parse
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # WMO weather codes -> (emoji, Chinese label)
@@ -55,6 +58,22 @@ PRESETS = {
     "singapore": (1.3521,  103.8198, "新加坡"),
 }
 
+# Province-level administrative code used by weather.cma.cn's public warning
+# feed.  Only Shanghai is enabled by default because this project currently
+# has no reliable coordinate-to-adcode lookup.
+CMA_ADCODE = {
+    "shanghai": "31",
+}
+
+CMA_ALARM_URL = "https://weather.cma.cn/api/map/alarm"
+CMA_ALARM_DETAIL_URL = "https://weather.cma.cn/web/alarm/{alert_id}.html"
+ALERT_LEVEL = {
+    "1": ("红色", 4, "🚨"),
+    "2": ("橙色", 3, "🟠"),
+    "3": ("黄色", 2, "🟡"),
+    "4": ("蓝色", 1, "🔵"),
+}
+
 
 def fetch_forecast(lat: float, lon: float, days: int = 16) -> dict:
     qs = urllib.parse.urlencode({
@@ -78,11 +97,145 @@ def fetch_forecast(lat: float, lon: float, days: int = 16) -> dict:
         return json.loads(r.read())
 
 
+def fetch_cma_alerts(adcode: str) -> list[dict]:
+    """Fetch current official weather warnings for a province-level adcode."""
+    qs = urllib.parse.urlencode({"adcode": adcode})
+    request = urllib.request.Request(
+        f"{CMA_ALARM_URL}?{qs}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "weather-ics/1.0 (+https://github.com/alwaysday1/weather-ics)",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        payload = json.loads(response.read())
+
+    if payload.get("code") != 0 or not isinstance(payload.get("data"), list):
+        raise RuntimeError(f"CMA warning endpoint returned an invalid response: {payload.get('msg', 'unknown error')}")
+    return payload["data"]
+
+
 def escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace(";", r"\;").replace(",", r"\,").replace("\n", r"\n")
 
 
-def build_ics(data: dict, city_name: str) -> str:
+def fold_ics_line(line: str, limit: int = 75) -> list[str]:
+    """Fold an ICS content line without splitting UTF-8 characters."""
+    folded = []
+    current = ""
+    content_limit = limit
+    prefix = ""
+    for char in line:
+        if current and len((current + char).encode("utf-8")) > content_limit:
+            folded.append(prefix + current)
+            current = char
+            prefix = " "
+            content_limit = limit - 1
+        else:
+            current += char
+    folded.append(prefix + current)
+    return folded
+
+
+def _alert_effective(alert: dict) -> datetime:
+    return datetime.strptime(alert["effective"], "%Y/%m/%d %H:%M")
+
+
+def _alert_type_key(alert: dict) -> str:
+    type_code = str(alert.get("type") or "")
+    if len(type_code) > 1 and type_code[-1] in ALERT_LEVEL:
+        return type_code[:-1]
+    headline = str(alert.get("headline") or alert.get("title") or "天气预警")
+    return re.sub(r"(?:红色|橙色|黄色|蓝色)?预警.*$", "", headline)
+
+
+def _alert_signal(alert: dict) -> str:
+    text = str(alert.get("headline") or alert.get("title") or "天气预警")
+    match = re.search(r"发布(?:中心城区)?(.+?)(?:红色|橙色|黄色|蓝色)预警", text)
+    return match.group(1) if match else "天气"
+
+
+def _alert_level(alert: dict) -> tuple[str, int, str]:
+    type_code = str(alert.get("type") or "")
+    if type_code and type_code[-1] in ALERT_LEVEL:
+        return ALERT_LEVEL[type_code[-1]]
+    text = str(alert.get("headline") or alert.get("title") or "")
+    for level, rank, emoji in ALERT_LEVEL.values():
+        if level in text:
+            return level, rank, emoji
+    return "", 0, "⚠️"
+
+
+def _alert_area(alert: dict) -> str:
+    title = str(alert.get("title") or "")
+    match = re.search(r"上海市(.+?)发布", title)
+    if match:
+        return match.group(1)
+    headline = str(alert.get("headline") or "")
+    if "中心城区" in headline:
+        return "中心城区"
+    match = re.match(r"(.+?)气象台", headline)
+    return match.group(1) if match else "上海市"
+
+
+def _alert_duration_hours(alert: dict) -> int:
+    """Infer display length from official wording; CMA does not expose expiry."""
+    description = str(alert.get("description") or "")
+    matches = [int(value) for value in re.findall(r"(?:未来)?(\d+)小时内", description)]
+    return max(matches, default=24)
+
+
+def group_cma_alerts(alerts: list[dict]) -> list[dict]:
+    """Merge city/district copies of the same warning into one calendar event."""
+    grouped = defaultdict(list)
+    for alert in alerts:
+        try:
+            effective = _alert_effective(alert)
+        except (KeyError, TypeError, ValueError):
+            continue
+        grouped[(_alert_type_key(alert), effective.date())].append(alert)
+
+    result = []
+    for (type_key, issue_date), items in grouped.items():
+        items.sort(key=_alert_effective)
+        strongest = max(items, key=lambda item: _alert_level(item)[1])
+        level, rank, emoji = _alert_level(strongest)
+        primary = next(
+            (
+                item
+                for item in items
+                if _alert_level(item)[1] == rank
+                and (
+                    str(item.get("id", "")).startswith("310199")
+                    or str(item.get("headline", "")).startswith(("上海市气象台", "上海中心气象台"))
+                )
+            ),
+            strongest,
+        )
+        start = min(_alert_effective(item) for item in items)
+        end = max(
+            _alert_effective(item) + timedelta(hours=_alert_duration_hours(item))
+            for item in items
+        )
+        areas = sorted({_alert_area(item) for item in items})
+        result.append(
+            {
+                "uid_key": f"{type_key}-{issue_date:%Y%m%d}",
+                "signal": _alert_signal(strongest),
+                "level": level,
+                "rank": rank,
+                "emoji": emoji,
+                "start": start,
+                "end": end,
+                "areas": areas,
+                "primary": primary,
+                "count": len(items),
+            }
+        )
+    return sorted(result, key=lambda item: (item["start"], -item["rank"]))
+
+
+def build_ics(data: dict, city_name: str, alerts: list[dict] | None = None) -> str:
     daily = data["daily"]
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -93,10 +246,10 @@ def build_ics(data: dict, city_name: str) -> str:
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         f"X-WR-CALNAME:{escape(city_name)}天气",
-        f"X-WR-CALDESC:{escape(city_name)} 16天预报 · Open-Meteo",
+        f"X-WR-CALDESC:{escape(city_name)} {len(daily['time'])}天预报 · Open-Meteo",
         "X-WR-TIMEZONE:Asia/Shanghai",
-        "REFRESH-INTERVAL;VALUE=DURATION:PT6H",
-        "X-PUBLISHED-TTL:PT6H",
+        "REFRESH-INTERVAL;VALUE=DURATION:PT1H",
+        "X-PUBLISHED-TTL:PT1H",
     ]
 
     for i, date_str in enumerate(daily["time"]):
@@ -116,9 +269,7 @@ def build_ics(data: dict, city_name: str) -> str:
         emoji, label = WMO.get(code, ("", f"代码{code}"))
         ymd = date_str.replace("-", "")
         next_day = datetime.strptime(date_str, "%Y-%m-%d")
-        next_ymd = (next_day.replace(day=next_day.day) ).strftime("%Y%m%d")
         # DTEND for all-day = day after start
-        from datetime import timedelta
         dtend = (next_day + timedelta(days=1)).strftime("%Y%m%d")
 
         summary = f"{emoji} {label} {round(tmax)}°/{round(tmin)}°"
@@ -142,6 +293,7 @@ def build_ics(data: dict, city_name: str) -> str:
             "BEGIN:VEVENT",
             f"UID:{uid}",
             f"DTSTAMP:{now}",
+            f"LAST-MODIFIED:{now}",
             f"DTSTART;VALUE=DATE:{ymd}",
             f"DTEND;VALUE=DATE:{dtend}",
             f"SUMMARY:{escape(summary)}",
@@ -150,9 +302,42 @@ def build_ics(data: dict, city_name: str) -> str:
             "END:VEVENT",
         ]
 
+    for alert in group_cma_alerts(alerts or []):
+        primary = alert["primary"]
+        official_url = CMA_ALARM_DETAIL_URL.format(alert_id=primary.get("id", ""))
+        areas = "、".join(alert["areas"])
+        summary = f"{alert['emoji']} 上海{alert['signal']}{alert['level']}预警"
+        desc_parts = [
+            str(primary.get("headline") or summary),
+            str(primary.get("description") or ""),
+            "",
+            f"覆盖：{areas}",
+            f"同类预警合并：{alert['count']} 条（市级/区级）",
+            "日历结束时间按预警原文时长推算；解除状态请以官方页面为准。",
+            f"详情：{official_url}",
+            "",
+            "Data: 中国气象局 / 国家预警信息发布中心",
+        ]
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:cma-alert-shanghai-{alert['uid_key']}@liutong.local",
+            f"DTSTAMP:{now}",
+            f"LAST-MODIFIED:{now}",
+            f"DTSTART;TZID=Asia/Shanghai:{alert['start']:%Y%m%dT%H%M%S}",
+            f"DTEND;TZID=Asia/Shanghai:{alert['end']:%Y%m%dT%H%M%S}",
+            f"SUMMARY:{escape(summary)}",
+            f"DESCRIPTION:{escape(chr(10).join(desc_parts))}",
+            f"URL:{official_url}",
+            "CATEGORIES:天气预警",
+            "STATUS:CONFIRMED",
+            "TRANSP:TRANSPARENT",
+            "END:VEVENT",
+        ]
+
     lines.append("END:VCALENDAR")
-    # ICS requires CRLF line endings
-    return "\r\n".join(lines) + "\r\n"
+    # RFC 5545 requires CRLF and recommends folding content lines at 75 octets.
+    folded_lines = [folded for line in lines for folded in fold_ics_line(line)]
+    return "\r\n".join(folded_lines) + "\r\n"
 
 
 def main():
@@ -163,6 +348,13 @@ def main():
     ap.add_argument("--name", type=str)
     ap.add_argument("--days", type=int, default=16)
     ap.add_argument("--out", type=str)
+    ap.add_argument(
+        "--alerts",
+        choices=("auto", "cma", "none"),
+        default="auto",
+        help="official warnings: auto enables CMA for supported presets; cma fails if unavailable",
+    )
+    ap.add_argument("--alert-adcode", help="CMA province-level adcode, e.g. 31 for Shanghai")
     args = ap.parse_args()
 
     if args.lat is not None and args.lon is not None:
@@ -174,9 +366,24 @@ def main():
 
     out = args.out or f"{args.city if args.lat is None else 'custom'}_weather.ics"
     data = fetch_forecast(lat, lon, args.days)
-    ics = build_ics(data, name)
+    alerts = []
+    adcode = args.alert_adcode or (CMA_ADCODE.get(args.city) if args.lat is None else None)
+    if args.alerts == "cma" and not adcode:
+        ap.error("--alerts cma requires --alert-adcode for custom coordinates or unsupported cities")
+    if args.alerts == "cma" or (args.alerts == "auto" and adcode):
+        try:
+            alerts = fetch_cma_alerts(adcode)
+        except Exception as exc:
+            if args.alerts == "cma":
+                raise
+            print(f"Warning: official weather alerts unavailable: {exc}", file=sys.stderr)
+
+    ics = build_ics(data, name, alerts)
     Path(out).write_text(ics, encoding="utf-8")
-    print(f"Wrote {out}  ({len(data['daily']['time'])} days)")
+    print(
+        f"Wrote {out}  ({len(data['daily']['time'])} days, "
+        f"{len(group_cma_alerts(alerts))} alert events)"
+    )
 
 
 if __name__ == "__main__":
