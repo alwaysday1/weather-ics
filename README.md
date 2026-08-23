@@ -1,33 +1,63 @@
 # weather-ics
 
-苹果日历 / Google Calendar / Outlook 通用天气订阅。数据源 [Open-Meteo](https://open-meteo.com)，免费、无需 API key，CC BY 4.0。
+苹果日历 / Google Calendar / Outlook 通用天气订阅。
+
+- 天气预报：[Open-Meteo](https://open-meteo.com)，免费、无需 API key，CC BY 4.0。
+- 上海气象预警：[中国气象局](https://weather.cma.cn/) / 国家预警信息发布中心，无需 API key。
 
 ## 一次性体验
 
 ```bash
 python3 weather_ics.py --city shanghai
-# → 生成 shanghai_weather.ics，AirDrop 到 iPhone 即可订阅
+# → 生成 shanghai_weather.ics，包含天气预报和上海当前官方预警
 ```
 
 预设城市：`shanghai` `beijing` `shenzhen` `hangzhou` `singapore`。
 任意坐标：`--lat 31.23 --lon 121.47 --name "上海"`。
 
+## 上海官方预警
+
+`shanghai` 预设会自动读取当前生效的上海市、中心城区和各区气象预警，包括台风、暴雨、大风、雷电、高温、大雾等中国气象局接口返回的信号。日历中显示为单独的限时事件，例如：
+
+```
+🟡 上海大风黄色预警
+🚨 上海台风红色预警
+```
+
+同一种信号的市级和区级预警会合并成一条事件，标题采用其中最高级别，描述保留覆盖区域、官方原文和详情链接，避免十几个区同时发布时刷屏。同一天预警升级时 UID 不变，日历客户端会更新原事件。
+
+```bash
+# 上海预设：自动尝试读取预警；接口临时不可用时仍生成天气预报
+python3 weather_ics.py --city shanghai --alerts auto
+
+# 部署模式：预警接口不可用时直接失败，避免发布一份错误的“无预警”日历
+python3 weather_ics.py --city shanghai --alerts cma
+
+# 仅生成天气预报
+python3 weather_ics.py --city shanghai --alerts none
+
+# 自定义坐标若要附加上海预警，需要显式指定行政区划代码
+python3 weather_ics.py --lat 31.23 --lon 121.47 --name 上海 --alerts cma --alert-adcode 31
+```
+
+> 注意：日历订阅不是应急推送渠道。生成任务和日历客户端都可能延迟刷新；中国气象局公开 Web 数据接口也没有稳定性 SLA。接口不提供明确解除时间，事件结束时间会按预警原文的“未来 N 小时”推算，实际状态始终以官方详情页或权威预警 App / 短信为准。
+
 ## 持续部署（推荐）
 
-GitHub Actions 每 6 小时跑一次，结果发布到 GitHub Pages，订阅 URL 永久不变。
+GitHub Actions 每小时跑一次，结果发布到 GitHub Pages，订阅 URL 永久不变。
 
-1. 新建一个 repo，把 `weather_ics.py` 和 `.github/workflows/refresh.yml` 提交进去。
+1. 新建一个 repo，把 `weather_ics.py` 和 `.github/workflows/main.yml` 提交进去。
 2. Settings → Pages → Source 选 **GitHub Actions**。
 3. Actions 页面手动跑一次 *Refresh weather ICS* 确认绿灯。
 4. 苹果日历 → 文件 → 新建日历订阅 → 填：
    ```
    https://<user>.github.io/<repo>/shanghai.ics
    ```
-   自动刷新频率建议 *每小时* 或 *每天*（系统会缓存，不会每次都拉源站）。
+   自动刷新频率建议设为 *每小时*（系统仍可能缓存或延迟拉取）。
 
 ## 输出格式
 
-每天一个 all-day VEVENT。标题示例：
+每天一个全天气象预报事件。标题示例：
 
 ```
 ☀️ 晴 27°/18°
@@ -35,13 +65,13 @@ GitHub Actions 每 6 小时跑一次，结果发布到 GitHub Pages，订阅 URL
 ⛈ 雷阵雨 27°/19° 🌧70%
 ```
 
-描述里附气温区间、降水概率、累计降水、最大风速、日出日落。
+天气事件描述里附气温区间、降水概率、累计降水、最大风速、日出日落；预警事件附官方原文、覆盖区域和详情链接。
 
 UID 按 `weather-<city>-<yyyymmdd>` 生成，**重复订阅会覆盖而不是堆积**——同一天的预报每次刷新都覆盖前一次结果，符合日历客户端预期。
 
 ## 配额
 
-Open-Meteo 非商用 10,000 次/天免费。本方案一天最多 4 次刷新 × 几个城市，远低于上限。
+Open-Meteo 非商用 10,000 次/天免费。本方案每小时刷新一次，即每个城市最多 24 次/天，仍远低于上限。
 
 ## 自定义
 
