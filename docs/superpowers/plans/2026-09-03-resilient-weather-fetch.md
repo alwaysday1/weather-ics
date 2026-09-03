@@ -30,33 +30,33 @@
 - Consumes: `urllib.request.urlopen`, provider JSON payloads, existing `fetch_forecast` and `fetch_cma_alerts` callers.
 - Produces: `_fetch_json(request, source, validate)` returning a validated JSON object or raising after deterministic retry handling.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
   Add tests covering HTTP 500 then success, invalid JSON then success, immediate
   HTTP 400 failure, and exhaustion after four timeout failures. Patch
   `weather_ics.time.sleep` so the tests remain deterministic and fast.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
   Run `/Users/admin/.local/share/mise/installs/python/3.12.13/bin/python3.12 -m unittest -v`.
   Expected: the new tests fail because retry behavior is absent.
 
-- [ ] **Step 3: Implement the minimal retry helper**
+- [x] **Step 3: Implement the minimal retry helper**
 
   Add request headers, retry classification, payload validation, backoff logging,
   and provider-specific final errors. Route both fetch functions through it.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
   Run `/Users/admin/.local/share/mise/installs/python/3.12.13/bin/python3.12 -m unittest -v`.
   Expected: all old and new tests pass with zero failures.
 
-- [ ] **Step 5: Update deployment behavior and documentation**
+- [x] **Step 5: Update deployment behavior and documentation**
 
   Change the Shanghai workflow invocation to `--alerts auto` and document that
   transient CMA failures publish forecast-only output with a warning.
 
-- [ ] **Step 6: Verify the complete change**
+- [x] **Step 6: Verify the complete change**
 
   Run the full unit suite, compile `weather_ics.py`, generate Shanghai and
   Singapore ICS files against live endpoints, validate both contain
