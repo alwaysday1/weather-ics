@@ -27,7 +27,7 @@ jobs:
       - name: Generate ICS files
         run: |
           mkdir -p public
-          python weather_ics.py --city shanghai  --alerts cma  --out public/shanghai.ics
+          python weather_ics.py --city shanghai  --alerts auto --out public/shanghai.ics
           python weather_ics.py --city singapore --alerts none --out public/singapore.ics
           # add more cities as needed
 

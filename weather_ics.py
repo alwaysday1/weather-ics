@@ -9,9 +9,12 @@ Usage:
     python weather_ics.py --lat 1.35 --lon 103.82 --name "Singapore" --out sg.ics
 """
 import argparse
+import http.client
 import json
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 import urllib.parse
 from collections import defaultdict
@@ -74,6 +77,71 @@ ALERT_LEVEL = {
     "4": ("蓝色", 1, "🔵"),
 }
 
+HTTP_TIMEOUT_SECONDS = 20
+RETRY_DELAYS_SECONDS = (2, 4, 8)
+
+
+def _fetch_json(request, source: str, validate) -> dict:
+    attempts = len(RETRY_DELAYS_SECONDS) + 1
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read())
+            if not validate(payload):
+                raise ValueError(f"{source} returned an invalid response")
+            return payload
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 and not 500 <= exc.code <= 599:
+                raise
+            last_error = exc
+        except (TimeoutError, urllib.error.URLError, http.client.HTTPException, ValueError) as exc:
+            last_error = exc
+
+        if attempt < attempts:
+            delay = RETRY_DELAYS_SECONDS[attempt - 1]
+            print(
+                f"Warning: {source} request attempt {attempt}/{attempts} failed: "
+                f"{last_error}; retrying in {delay}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+    raise RuntimeError(f"{source} unavailable after {attempts} attempts") from last_error
+
+
+def _valid_forecast_payload(payload: dict) -> bool:
+    if not isinstance(payload, dict) or not isinstance(payload.get("daily"), dict):
+        return False
+
+    daily = payload["daily"]
+    fields = (
+        "time",
+        "weather_code",
+        "temperature_2m_max",
+        "temperature_2m_min",
+        "precipitation_sum",
+        "precipitation_probability_max",
+        "wind_speed_10m_max",
+        "sunrise",
+        "sunset",
+    )
+    days = daily.get("time")
+    return (
+        isinstance(days, list)
+        and len(days) > 0
+        and all(isinstance(daily.get(field), list) and len(daily[field]) == len(days) for field in fields)
+    )
+
+
+def _valid_cma_payload(payload: dict) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("code") == 0
+        and isinstance(payload.get("data"), list)
+    )
+
 
 def fetch_forecast(lat: float, lon: float, days: int = 16) -> dict:
     qs = urllib.parse.urlencode({
@@ -93,8 +161,14 @@ def fetch_forecast(lat: float, lon: float, days: int = 16) -> dict:
         "forecast_days": days,
     })
     url = f"https://api.open-meteo.com/v1/forecast?{qs}"
-    with urllib.request.urlopen(url, timeout=15) as r:
-        return json.loads(r.read())
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "weather-ics/1.0 (+https://github.com/alwaysday1/weather-ics)",
+        },
+    )
+    return _fetch_json(request, "Open-Meteo", _valid_forecast_payload)
 
 
 def fetch_cma_alerts(adcode: str) -> list[dict]:
@@ -107,11 +181,7 @@ def fetch_cma_alerts(adcode: str) -> list[dict]:
             "User-Agent": "weather-ics/1.0 (+https://github.com/alwaysday1/weather-ics)",
         },
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        payload = json.loads(response.read())
-
-    if payload.get("code") != 0 or not isinstance(payload.get("data"), list):
-        raise RuntimeError(f"CMA warning endpoint returned an invalid response: {payload.get('msg', 'unknown error')}")
+    payload = _fetch_json(request, "CMA", _valid_cma_payload)
     return payload["data"]
 
 

@@ -1,6 +1,11 @@
+import io
+import json
 import unittest
+import urllib.error
+from contextlib import redirect_stderr
+from unittest.mock import patch
 
-from weather_ics import build_ics, fold_ics_line, group_cma_alerts
+from weather_ics import build_ics, fetch_cma_alerts, fetch_forecast, fold_ics_line, group_cma_alerts
 
 
 FORECAST = {
@@ -37,7 +42,107 @@ ALERTS = [
 ]
 
 
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return self.payload
+
+
 class WeatherIcsTests(unittest.TestCase):
+    @patch("time.sleep")
+    @patch("weather_ics.urllib.request.urlopen")
+    def test_forecast_retries_http_500_then_succeeds(self, urlopen, sleep):
+        urlopen.side_effect = [
+            urllib.error.HTTPError("https://example.test", 500, "Internal Server Error", {}, None),
+            FakeResponse(json.dumps(FORECAST).encode()),
+        ]
+
+        with redirect_stderr(io.StringIO()):
+            result = fetch_forecast(31.2304, 121.4737)
+
+        self.assertEqual(result, FORECAST)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    @patch("time.sleep")
+    @patch("weather_ics.urllib.request.urlopen")
+    def test_forecast_retries_invalid_json_then_succeeds(self, urlopen, sleep):
+        urlopen.side_effect = [
+            FakeResponse(b""),
+            FakeResponse(json.dumps(FORECAST).encode()),
+        ]
+
+        with redirect_stderr(io.StringIO()):
+            result = fetch_forecast(31.2304, 121.4737)
+
+        self.assertEqual(result, FORECAST)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    @patch("time.sleep")
+    @patch("weather_ics.urllib.request.urlopen")
+    def test_forecast_retries_structurally_invalid_payload(self, urlopen, sleep):
+        urlopen.side_effect = [
+            FakeResponse(b"{}"),
+            FakeResponse(json.dumps(FORECAST).encode()),
+        ]
+
+        with redirect_stderr(io.StringIO()):
+            result = fetch_forecast(31.2304, 121.4737)
+
+        self.assertEqual(result, FORECAST)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    @patch("time.sleep")
+    @patch("weather_ics.urllib.request.urlopen")
+    def test_forecast_does_not_retry_http_400(self, urlopen, sleep):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://example.test", 400, "Bad Request", {}, None
+        )
+
+        with self.assertRaises(urllib.error.HTTPError):
+            fetch_forecast(31.2304, 121.4737)
+
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    @patch("time.sleep")
+    @patch("weather_ics.urllib.request.urlopen")
+    def test_forecast_raises_after_four_timeouts(self, urlopen, sleep):
+        urlopen.side_effect = TimeoutError("timed out")
+
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "Open-Meteo unavailable after 4 attempts"):
+                fetch_forecast(31.2304, 121.4737)
+
+        self.assertEqual(urlopen.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4, 8])
+
+    @patch("time.sleep")
+    @patch("weather_ics.urllib.request.urlopen")
+    def test_cma_retries_network_error_then_succeeds(self, urlopen, sleep):
+        payload = {"code": 0, "data": ALERTS}
+        urlopen.side_effect = [
+            urllib.error.URLError("network unreachable"),
+            FakeResponse(json.dumps(payload).encode()),
+        ]
+
+        with redirect_stderr(io.StringIO()):
+            result = fetch_cma_alerts("31")
+
+        self.assertEqual(result, ALERTS)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(2)
+
     def test_groups_district_alerts_and_keeps_strongest_level(self):
         grouped = group_cma_alerts(ALERTS)
 

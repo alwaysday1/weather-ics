@@ -30,7 +30,7 @@ python3 weather_ics.py --city shanghai
 # 上海预设：自动尝试读取预警；接口临时不可用时仍生成天气预报
 python3 weather_ics.py --city shanghai --alerts auto
 
-# 部署模式：预警接口不可用时直接失败，避免发布一份错误的“无预警”日历
+# 严格模式：预警接口不可用时直接失败
 python3 weather_ics.py --city shanghai --alerts cma
 
 # 仅生成天气预报
@@ -45,6 +45,9 @@ python3 weather_ics.py --lat 31.23 --lon 121.47 --name 上海 --alerts cma --ale
 ## 持续部署（推荐）
 
 GitHub Actions 每小时跑一次，结果发布到 GitHub Pages，订阅 URL 永久不变。
+工作流会重试 Open-Meteo 和中国气象局的瞬时网络故障；如果 CMA
+预警接口在重试后仍不可用，会输出 warning 并发布仅含天气预报的日历。
+Open-Meteo 在重试后仍不可用时任务才会失败并发送 GitHub 通知。
 
 1. 新建一个 repo，把 `weather_ics.py` 和 `.github/workflows/main.yml` 提交进去。
 2. Settings → Pages → Source 选 **GitHub Actions**。
